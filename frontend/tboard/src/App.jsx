@@ -1,6 +1,9 @@
 import { useState, useEffect, useRef } from 'react'
 import { Wallet, Share2, Users, Trophy, Gamepad2, Coins, X, Check, Zap, Sparkles, Search, Clock, Copy, TrendingUp, TrendingDown, ArrowLeft, Gift } from 'lucide-react'
 
+import { useTonWallet } from './hooks/useTonWallet'
+import { RefreshCw } from 'lucide-react'
+
 // Import game components (create these files in your src folder)
 import RockPaperScissors from './RockPaperScissors'
 import Checkers from './Checkers'
@@ -10,9 +13,17 @@ import GameResultModal from './GameResultModal'
 const TBoardApp = () => {
   const [scrollY, setScrollY] = useState(0)
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 })
-  const [isWalletConnected, setIsWalletConnected] = useState(false)
-  const [walletAddress, setWalletAddress] = useState('')
-  const [balance, setBalance] = useState(125.5)
+  // TON Wallet
+  const { 
+    address, 
+    formattedAddress, 
+    balance, 
+    loading: balanceLoading,
+    isConnected, 
+    connect, 
+    disconnect,
+    refreshBalance 
+  } = useTonWallet()
   const [showGameSelect, setShowGameSelect] = useState(false)
   const [showBetSelect, setShowBetSelect] = useState(false)
   const [selectedGame, setSelectedGame] = useState(null)
@@ -52,12 +63,12 @@ const TBoardApp = () => {
   ]
 
   const betAmounts = [
+    { value: 0.05, label: '0.05 TON' },
+    { value: 0.1, label: '0.1 TON' },
+    { value: 0.5, label: '0.5 TON' },
     { value: 1, label: '1 TON' },
     { value: 5, label: '5 TON' },
-    { value: 10, label: '10 TON' },
-    { value: 25, label: '25 TON' },
-    { value: 50, label: '50 TON' },
-    { value: 100, label: '100 TON' }
+    { value: 10, label: '10 TON' }
   ]
 
   const [activeLobby, setActiveLobby] = useState([
@@ -70,11 +81,6 @@ const TBoardApp = () => {
 
 
 
-
-  const handleConnectWallet = () => {
-    setWalletAddress('EQx...abcd')
-    setIsWalletConnected(true)
-  }
 
   const handleCreateGame = () => {
     setShowGameSelect(true)
@@ -140,14 +146,18 @@ const TBoardApp = () => {
     alert('Referral link copied!')
   }
 
-  const handleDisconnectWallet = () => {
-    setIsWalletConnected(false)
-    setWalletAddress('')
+  const handleDisconnectWallet = async () => {
+    await disconnect()
     setShowProfileModal(false)
   }
 
+  const handleCopyAddress = () => {
+    navigator.clipboard.writeText(address)
+    alert('Address copied!')
+  }
+
   // Welcome Screen
-  if (!isWalletConnected) {
+  if (!isConnected) {
     return (
       <div className="bg-slate-950 text-white min-h-screen font-sans overflow-hidden relative flex items-center justify-center">
         <style dangerouslySetInnerHTML={{__html: `
@@ -201,7 +211,7 @@ const TBoardApp = () => {
           </div>
 
           <button
-            onClick={handleConnectWallet}
+            onClick={connect}
             onMouseEnter={() => setIsHovering(true)}
             onMouseLeave={() => setIsHovering(false)}
             className="w-full group relative px-8 py-4 rounded-xl font-bold text-lg overflow-hidden bg-gradient-to-r from-cyan-500 to-blue-600 hover:shadow-2xl hover:shadow-cyan-500/50 transition-all transform hover:scale-105 mb-4"
@@ -272,11 +282,15 @@ const TBoardApp = () => {
           </div>
 
           <div 
-            className="flex items-center gap-2 bg-slate-800 px-4 py-2 rounded-lg"
+            className="flex items-center gap-2 bg-slate-800 px-4 py-2 rounded-lg group cursor-pointer" 
+            onClick={refreshBalance}
           >
             <Coins className="w-5 h-5 text-yellow-400" />
-            <span className="font-bold text-lg">{balance.toFixed(2)}</span>
+            <span className="font-bold text-lg">
+              {balanceLoading ? '...' : balance.toFixed(2)}
+            </span>
             <span className="text-gray-400 text-sm">TON</span>
+            <RefreshCw className="w-4 h-4 text-gray-400 group-hover:text-cyan-400 group-hover:rotate-180 transition-all" />
           </div>
         </div>
       </header>
@@ -405,19 +419,33 @@ const TBoardApp = () => {
                 {selectedGame.name}
               </h2>
               <p className="text-gray-400 mt-2">Select your bet amount</p>
+              <div className="mt-3 bg-slate-800 rounded-lg px-4 py-2 inline-flex items-center gap-2">
+                <span className="text-sm text-gray-400">Your balance:</span>
+                <span className="font-bold text-yellow-400">{balance.toFixed(2)} TON</span>
+              </div>
             </div>
 
             <div className="grid grid-cols-3 gap-3">
-              {betAmounts.map((bet) => (
-                <button
-                  key={bet.value}
-                  onClick={() => handleBetSelect(bet)}
-                  className="group bg-slate-800 hover:bg-slate-700 border-2 border-slate-700 hover:border-yellow-500 rounded-xl p-4 transition-all transform hover:scale-105"
-                >
-                  <div className="text-2xl font-bold text-yellow-400 mb-1">{bet.value}</div>
-                  <div className="text-xs text-gray-400">TON</div>
-                </button>
-              ))}
+              {betAmounts.map((bet) => {
+                const canAfford = balance >= bet.value
+                return (
+                  <button
+                    key={bet.value}
+                    onClick={() => canAfford && handleBetSelect(bet)}
+                    disabled={!canAfford}
+                    className={`group border-2 rounded-xl p-4 transition-all transform ${
+                      canAfford 
+                        ? 'bg-slate-800 hover:bg-slate-700 border-slate-700 hover:border-yellow-500 hover:scale-105 cursor-pointer' 
+                        : 'bg-slate-900 border-slate-800 opacity-50 cursor-not-allowed'
+                    }`}
+                  >
+                    <div className={`text-2xl font-bold mb-1 ${canAfford ? 'text-yellow-400' : 'text-gray-600'}`}>
+                      {bet.value}
+                    </div>
+                    <div className="text-xs text-gray-400">TON</div>
+                  </button>
+                )
+              })}
             </div>
           </div>
         </div>
@@ -594,12 +622,9 @@ const TBoardApp = () => {
                 <h3 className="text-2xl font-bold mb-2">{userProfile.name}</h3>
                 <div className="flex items-center justify-center gap-2 bg-slate-800 px-4 py-2 rounded-lg mb-4 max-w-xs mx-auto">
                   <Wallet className="w-4 h-4 text-cyan-400" />
-                  <span className="text-sm text-gray-400">{walletAddress}</span>
+                  <span className="text-sm text-gray-400">{formattedAddress}</span>
                   <button
-                    onClick={() => {
-                      navigator.clipboard.writeText('EQx...abcd')
-                      alert('Address copied!')
-                    }}
+                    onClick={handleCopyAddress}
                     className="p-1 hover:bg-slate-700 rounded transition-all"
                   >
                     <Copy className="w-3 h-3" />
