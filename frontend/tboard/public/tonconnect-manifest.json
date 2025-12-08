@@ -1,8 +1,7 @@
 {
+  "url": "http://localhost:5173",
   "name": "TBoard",
-  "description": "Classic Games Arena",
-  "icons": ["http://localhost:5173/icon.png"],
-  "redirect": "http://localhost:5173",
-  "termsOfUseUrl": "http://localhost:5173/terms",
-  "privacyPolicyUrl": "http://localhost:5173/privacy"
+  "iconUrl": "http://localhost:5173/vite.svg",
+  "termsOfUseUrl": "http://localhost:5173",
+  "privacyPolicyUrl": "http://localhost:5173"
 }
