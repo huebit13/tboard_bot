@@ -19,7 +19,7 @@ class User(Base):
     balance_ton = Column(DECIMAL(18, 9), default=0)
     referral_link = Column(String(255), unique=True, nullable=False, index=True)
     referred_by = Column(BigInteger, ForeignKey("users.id"), index=True)
-    referral_rate = Column(DECIMAL(5, 2), default=50.00)
+    referral_rate = Column(DECIMAL(5, 2), default=40.00)
     referral_earnings_ton = Column(DECIMAL(18, 9), default=0)
     total_games_played = Column(Integer, default=0)
     total_wins = Column(Integer, default=0)
