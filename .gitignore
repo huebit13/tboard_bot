@@ -43,3 +43,5 @@ backend/__pycache__
 frontend/tboard/.vite
 frontend/tboard/dist
 frontend\tboard\.env
+.vite
+dist/
