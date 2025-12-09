@@ -3,3 +3,8 @@ uvicorn
 pytoniq==0.1.25
 pyjwt
 python-chess
+sqlalchemy==2.0.25
+psycopg2-binary==2.9.9
+python-dotenv==1.0.0
+alembic==1.13.1
+pydantic==2.5.3
