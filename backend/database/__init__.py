@@ -1,4 +1,8 @@
-from .connection import engine, SessionLocal, get_db
-from .models import User, Game, Referral
+# backend/database/__init__.py
 
-__all__ = ["engine", "SessionLocal", "get_db", "User", "Game", "Referral"]
+# Импортируем нужные объекты из connection.py
+from .connection import engine, AsyncSessionLocal as SessionLocal, get_db, Base # Добавлен Base
+from .models import User, Game, Referral
+from sqlalchemy.ext.asyncio import AsyncSession
+
+__all__ = ["engine", "SessionLocal", "get_db", "User", "Game", "Referral", "AsyncSession", "Base"] # Добавлен Base

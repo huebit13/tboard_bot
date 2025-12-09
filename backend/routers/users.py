@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.schemas.user import UserCreate, WalletConnect
-from app.crud.user import create_or_update_user, connect_wallet
-from app.database import get_db
+from backend.schemas.user import UserCreate, WalletConnect
+from backend.crud.user import create_or_update_user, connect_wallet
+from backend.database import get_db
 
 router = APIRouter()
 
