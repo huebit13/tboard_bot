@@ -273,4 +273,3 @@ class GameManager:
 # Для упрощения примера создадим глобальный экземпляр
 game_manager = GameManager()
 
-```
