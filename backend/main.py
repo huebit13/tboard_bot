@@ -21,15 +21,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(users.router, prefix="/api", tags=["users"])
+
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 @app.post("/api/auth/login")
 async def login(request: Request, db: AsyncSession = Depends(get_db)): 
     try:
+        logger.info("Login endpoint called") # Добавьте лог
         body = await request.json()
         init_data = body.get("initData")
         
         if not init_data:
+            logger.warning("Init data is missing in request") # Добавьте лог
             raise HTTPException(status_code=400, detail="Init data is required")
         
         # Парсим initData
@@ -43,6 +47,7 @@ async def login(request: Request, db: AsyncSession = Depends(get_db)):
         
         # Получаем данные пользователя
         if 'user' not in params:
+            logger.warning("User data not found in init data") # Добавьте лог
             raise HTTPException(status_code=400, detail="User data not found")
         
         user_data = json.loads(params['user'])
@@ -50,8 +55,11 @@ async def login(request: Request, db: AsyncSession = Depends(get_db)):
         username = user_data.get("username")
         
         if not telegram_id:
+            logger.warning("Telegram ID not found in user data") # Добавьте лог
             raise HTTPException(status_code=400, detail="Telegram ID not found")
         
+        logger.info(f"Processing user: telegram_id={telegram_id}, username={username}") # Добавьте лог
+
         # Создаем/обновляем пользователя
         user = await create_or_update_user(
             db=db,
@@ -59,7 +67,7 @@ async def login(request: Request, db: AsyncSession = Depends(get_db)):
             username=username
         )
         
-        logger.info(f"User created/updated: telegram_id={telegram_id}, id={user.id}")
+        logger.info(f"User processed successfully: telegram_id={telegram_id}, id={user.id if user else 'None'}") # Добавьте лог
         
         return {
             "status": "ok",
@@ -74,9 +82,10 @@ async def login(request: Request, db: AsyncSession = Depends(get_db)):
         }
         
     except HTTPException:
+        logger.error("HTTPException in login", exc_info=True) # Добавьте лог
         raise
     except Exception as e:
-        logger.error(f"Login error: {e}", exc_info=True)
+        logger.error(f"Unexpected error in login: {e}", exc_info=True) # Добавьте лог
         raise HTTPException(status_code=500, detail=str(e))
 
 
