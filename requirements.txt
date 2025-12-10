@@ -9,3 +9,4 @@ python-dotenv==1.0.0
 alembic==1.13.1
 pydantic==2.5.3
 asyncpg
+pyjwt

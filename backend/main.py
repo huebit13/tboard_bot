@@ -4,6 +4,8 @@ from backend.database import engine, get_db, Base, AsyncSession
 from backend.schemas.user import UserCreate, WalletConnect
 from backend.crud.user import create_or_update_user, connect_wallet
 from backend.routers import users
+from datetime import timedelta
+from backend.utils.jwt import create_access_token
 import os
 import json
 import logging
@@ -68,10 +70,15 @@ async def login(request: Request, db: AsyncSession = Depends(get_db)):
         )
         
         logger.info(f"User processed successfully: telegram_id={telegram_id}, id={user.id if user else 'None'}") # Добавьте лог
+
+        access_token_data = {"sub": user.id} 
+        access_token = create_access_token(data=access_token_data, expires_delta=timedelta(hours=1))
         
         return {
             "status": "ok",
             "message": "User authenticated",
+            "access_token": access_token,
+            "token_type": "bearer",
             "user": {
                 "id": user.id,
                 "telegram_id": user.telegram_id,
