@@ -1,11 +1,12 @@
-from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi import FastAPI, HTTPException, Depends, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from backend.database import engine, get_db, Base, AsyncSession 
 from backend.schemas.user import UserCreate, WalletConnect
 from backend.crud.user import create_or_update_user, connect_wallet
 from backend.routers import users
 from datetime import timedelta
-from backend.utils.jwt import create_access_token
+from backend.utils.jwt import create_access_token, verify_token
+from backend.managers.game_manager import game_manager
 import os
 import json
 import logging
@@ -97,6 +98,61 @@ async def login(request: Request, db: AsyncSession = Depends(get_db)):
 
 
 app.include_router(users.router, prefix="/api", tags=["users"])
+
+@app.websocket("/ws/game")
+async def websocket_endpoint(websocket: WebSocket):
+    # Проверяем токен из URL-параметра (например, /ws/game?token=...)
+    token = websocket.query_params.get("token")
+    if not token:
+        logger.warning("WebSocket connection attempt without token.")
+        await websocket.close(code=1008) # Policy Violation
+        return
+
+    user_data = verify_token(token)
+    if not user_data:
+        logger.warning("WebSocket connection attempt with invalid token.")
+        await websocket.close(code=1008) # Policy Violation
+        return
+
+    user_id = user_data["user_id"]
+    logger.info(f"WebSocket connection attempt for user {user_id}.")
+
+    # Подключаем пользователя через менеджер
+    await game_manager.connect_user(websocket, user_id)
+
+    try:
+        while True:
+            # Ждём сообщение от клиента
+            data = await websocket.receive_json()
+            action = data.get("action")
+
+            if action == "join_queue":
+                game_type = data.get("game_type", "rps") # По умолчанию RPS
+                stake = data.get("stake")
+                if stake is None:
+                    await websocket.send_json({"type": "error", "message": "Stake is required to join queue."})
+                    continue
+                # Добавляем в очередь через менеджер
+                await game_manager.add_to_queue(user_id, game_type, stake)
+
+            elif action == "make_move":
+                game_id = data.get("game_id")
+                move = data.get("move")
+                if not game_id or not move:
+                    await websocket.send_json({"type": "error", "message": "Game ID and move are required."})
+                    continue
+                # Обрабатываем ход через менеджер
+                await game_manager.handle_player_move(game_id, user_id, move)
+
+            # Добавьте другие действия по мере необходимости (например, leave_queue)
+
+    except WebSocketDisconnect:
+        # Обрабатываем отключение клиента
+        game_manager.disconnect_user(user_id)
+        logger.info(f"WebSocket disconnected for user {user_id}.")
+    except Exception as e:
+        logger.error(f"Error in WebSocket connection for user {user_id}: {e}")
+        game_manager.disconnect_user(user_id)
 
 
 @app.on_event("startup")
