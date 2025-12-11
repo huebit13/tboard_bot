@@ -27,11 +27,13 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
 def verify_token(token: str):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id: int = payload.get("sub")
+        user_id_str: str = payload.get("sub")
         
-        if user_id is None:
+        if user_id_str is None:
             logger.warning("Token verification failed: 'sub' claim missing")
             return None
+        
+        user_id = int(user_id_str)
         
         logger.info(f"Token verified successfully for user_id: {user_id}")
         return {"user_id": user_id}

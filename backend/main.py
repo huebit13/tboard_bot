@@ -76,7 +76,7 @@ async def login(request: Request, db: AsyncSession = Depends(get_db)):
         
         logger.info(f"User processed successfully: telegram_id={telegram_id}, id={user.id if user else 'None'}")
 
-        access_token_data = {"sub": user.id} 
+        access_token_data = {"sub": str(user.id)} 
         access_token = create_access_token(data=access_token_data, expires_delta=timedelta(hours=1))
         
         return {
