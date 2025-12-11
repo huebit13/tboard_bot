@@ -7,6 +7,7 @@ from backend.routers import users
 from datetime import timedelta
 from backend.utils.jwt import create_access_token, verify_token
 from backend.managers.game_manager import game_manager
+from backend.database.models import Game, User, Lobby
 import os
 import json
 import logging
@@ -164,6 +165,80 @@ async def websocket_endpoint(websocket: WebSocket):
                         "type": "queue_joined",
                         "message": f"Joined queue for {game_type} with stake {stake}"
                     })
+                
+                elif action == "create_lobby":
+                    game_type = data.get("game_type")
+                    stake = data.get("stake")
+                    password = data.get("password")  # может быть None
+                    if not game_type or stake is None:
+                        await websocket.send_json({"type": "error", "message": "game_type and stake required"})
+                        continue
+                    lobby_id = await game_manager.create_lobby(user_id, game_type, stake, password)
+                    await websocket.send_json({
+                        "type": "lobby_created",
+                        "lobby_id": lobby_id,
+                        "game_type": game_type,
+                        "stake": stake,
+                        "has_password": password is not None
+                    })
+
+                elif action == "join_lobby":
+                    lobby_id = data.get("lobby_id")
+                    password = data.get("password")
+                    if not lobby_id:
+                        await websocket.send_json({"type": "error", "message": "lobby_id required"})
+                        continue
+                    success, msg = await game_manager.join_lobby(user_id, lobby_id, password)
+                    if success:
+                        lobby = game_manager.active_lobbies[lobby_id]
+                        await game_manager._send_to_user(lobby["creator_id"], {
+                            "type": "lobby_joined",
+                            "lobby_id": lobby_id,
+                            "joiner_id": user_id
+                        })
+                        await websocket.send_json({
+                            "type": "lobby_joined",
+                            "lobby_id": lobby_id,
+                            "creator_id": lobby["creator_id"]
+                        })
+                    else:
+                        await websocket.send_json({"type": "error", "message": msg})
+
+                elif action == "set_lobby_ready":
+                    lobby_id = data.get("lobby_id")
+                    is_ready = data.get("is_ready", False)
+                    if lobby_id:
+                        await game_manager.set_lobby_ready(user_id, lobby_id, is_ready)
+                        # Рассылаем обновление
+                        if lobby_id in game_manager.active_lobbies:
+                            lobby = game_manager.active_lobbies[lobby_id]
+                            for uid in [lobby["creator_id"], lobby["joiner_id"]]:
+                                if uid:
+                                    await game_manager._send_to_user(uid, {
+                                        "type": "lobby_updated",
+                                        "lobby_id": lobby_id,
+                                        "players": [
+                                            {"user_id": lobby["creator_id"], "ready": lobby["creator_ready"]},
+                                            {"user_id": lobby["joiner_id"], "ready": lobby["joiner_ready"]} if lobby["joiner_id"] else None
+                                        ]
+                                    })
+
+                elif action == "kick_player":
+                    lobby_id = data.get("lobby_id")
+                    target_id = data.get("target_id")
+                    if lobby_id and target_id:
+                        success = await game_manager.kick_from_lobby(user_id, lobby_id, target_id)
+                        if success:
+                            await game_manager._send_to_user(target_id, {
+                                "type": "kicked_from_lobby",
+                                "lobby_id": lobby_id
+                            })
+                            lobby = game_manager.active_lobbies[lobby_id]
+                            await game_manager._send_to_user(lobby["creator_id"], {
+                                "type": "lobby_updated",
+                                "lobby_id": lobby_id,
+                                "players": [{"user_id": lobby["creator_id"], "ready": False}]
+                            })
 
                 elif action == "leave_queue":
                     # TODO: Реализовать выход из очереди

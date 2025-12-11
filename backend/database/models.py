@@ -112,3 +112,21 @@ class Referral(Base):
     __table_args__ = (
         Index('idx_referrals_active', 'referrer_id', 'is_active'),
     )
+
+class Lobby(Base):
+    __tablename__ = "lobbies"
+
+    id = Column(Integer, primary_key=True, index=True)
+    game_type = Column(String(20), nullable=False)
+    stake = Column(DECIMAL(18, 9), nullable=False)
+    password_hash = Column(String(128), nullable=True)  # bcrypt hash
+    creator_id = Column(BigInteger, ForeignKey("users.id"), nullable=False, index=True)
+    joiner_id = Column(BigInteger, ForeignKey("users.id"), nullable=True, index=True)
+    status = Column(String(20), default="waiting")  # waiting, full, ready, started, cancelled
+    created_at = Column(TIMESTAMP, server_default=func.now())
+    updated_at = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
+    expires_at = Column(TIMESTAMP)
+
+    # Relationships
+    creator = relationship("User", foreign_keys=[creator_id])
+    joiner = relationship("User", foreign_keys=[joiner_id])

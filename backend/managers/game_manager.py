@@ -48,6 +48,7 @@ class GameManager:
         self.active_games: Dict[int, ActiveGame] = {}
         self.active_connections: Dict[int, PlayerConnection] = {}
         self._lock = asyncio.Lock()
+        self.active_lobbies: Dict[int, Dict] = {}
 
     async def connect_user(self, websocket, user_id: int):
         await websocket.accept()
@@ -282,6 +283,133 @@ class GameManager:
                 self.disconnect_user(user_id)
         else:
             logger.warning(f"User {user_id} not connected")
+    
+    async def create_lobby(self, user_id: int, game_type: str, stake: float, password: Optional[str] = None):
+        from backend.database import AsyncSessionLocal
+        from datetime import datetime, timedelta
+        import bcrypt
+
+        async with AsyncSessionLocal() as db:
+            # Создаём запись в БД
+            password_hash = None
+            if password:
+                password_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+            expires_at = datetime.utcnow() + timedelta(minutes=10)
+
+            lobby = Lobby(
+                game_type=game_type,
+                stake=Decimal(stake),
+                password_hash=password_hash,
+                creator_id=user_id,
+                status="waiting",
+                expires_at=expires_at
+            )
+            db.add(lobby)
+            await db.commit()
+            await db.refresh(lobby)
+
+            # Храним в памяти для быстрого доступа
+            self.active_lobbies[lobby.id] = {
+                "id": lobby.id,
+                "game_type": game_type,
+                "stake": stake,
+                "has_password": password is not None,
+                "creator_id": user_id,
+                "joiner_id": None,
+                "creator_ready": False,
+                "joiner_ready": False,
+                "status": "waiting"
+            }
+
+            return lobby.id
+
+    async def join_lobby(self, user_id: int, lobby_id: int, password: Optional[str] = None):
+        import bcrypt
+        if lobby_id not in self.active_lobbies:
+            return False, "Lobby not found"
+
+        lobby = self.active_lobbies[lobby_id]
+        if lobby["joiner_id"] is not None:
+            return False, "Lobby is full"
+
+        from backend.database import AsyncSessionLocal
+        async with AsyncSessionLocal() as db:
+            db_lobby = await db.get(Lobby, lobby_id)
+            if not db_lobby:
+                return False, "Lobby not found in DB"
+
+            # Проверка пароля
+            if db_lobby.password_hash:
+                if not password:
+                    return False, "Password required"
+                if not bcrypt.checkpw(password.encode('utf-8'), db_lobby.password_hash.encode('utf-8')):
+                    return False, "Invalid password"
+
+            # Обновляем в БД и в памяти
+            db_lobby.joiner_id = user_id
+            db_lobby.status = "full"
+            await db.commit()
+
+            lobby["joiner_id"] = user_id
+            lobby["status"] = "full"
+
+        return True, "Joined"
+
+    async def set_lobby_ready(self, user_id: int, lobby_id: int, is_ready: bool):
+        if lobby_id not in self.active_lobbies:
+            return
+        lobby = self.active_lobbies[lobby_id]
+        if user_id == lobby["creator_id"]:
+            lobby["creator_ready"] = is_ready
+        elif user_id == lobby["joiner_id"]:
+            lobby["joiner_ready"] = is_ready
+        else:
+            return
+
+        # Проверяем, оба ли ready
+        if lobby["joiner_id"] and lobby["creator_ready"] and lobby["joiner_ready"]:
+            await self._start_game_from_lobby(lobby_id)
+
+    async def kick_from_lobby(self, kicker_id: int, lobby_id: int, target_id: int):
+        if lobby_id not in self.active_lobbies:
+            return False
+        lobby = self.active_lobbies[lobby_id]
+        if lobby["creator_id"] != kicker_id:
+            return False  # Только создатель может кикать
+        if target_id != lobby["joiner_id"]:
+            return False
+
+        lobby["joiner_id"] = None
+        lobby["joiner_ready"] = False
+        lobby["status"] = "waiting"
+
+        from backend.database import AsyncSessionLocal
+        async with AsyncSessionLocal() as db:
+            db_lobby = await db.get(Lobby, lobby_id)
+            if db_lobby:
+                db_lobby.joiner_id = None
+                db_lobby.status = "waiting"
+                await db.commit()
+
+        return True
+
+    async def _start_game_from_lobby(self, lobby_id: int):
+        lobby = self.active_lobbies[lobby_id]
+        await self._create_game(
+            player1_id=lobby["creator_id"],
+            player2_id=lobby["joiner_id"],
+            game_type=lobby["game_type"],
+            stake=lobby["stake"]
+        )
+        # Удаляем лобби
+        del self.active_lobbies[lobby_id]
+        from backend.database import AsyncSessionLocal
+        async with AsyncSessionLocal() as db:
+            db_lobby = await db.get(Lobby, lobby_id)
+            if db_lobby:
+                await db.delete(db_lobby)
+                await db.commit()
 
 
 game_manager = GameManager()
