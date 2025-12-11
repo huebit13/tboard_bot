@@ -382,6 +382,14 @@ class GameManager:
         lobby = self.active_lobbies[lobby_id]
 
         if lobby["creator_id"] == user_id:
+            # ✅ НОВОЕ: уведомляем участника о закрытии лобби
+            if lobby["joiner_id"]:
+                await self._send_to_user(lobby["joiner_id"], {
+                    "type": "lobby_closed",
+                    "lobby_id": lobby_id,
+                    "reason": "Creator left"
+                })
+            
             # Создатель выходит — удаляем лобби полностью
             del self.active_lobbies[lobby_id]
             from backend.database import AsyncSessionLocal
@@ -407,11 +415,11 @@ class GameManager:
                     db_lobby.status = "waiting"
                     await db.commit()
 
-            # Уведомляем создателя
+            # ✅ ИСПРАВЛЕНО: правильное сообщение для создателя
             await self._send_to_user(lobby["creator_id"], {
-                "type": "lobby_joined_left",
+                "type": "lobby_player_left",
                 "lobby_id": lobby_id,
-                "joiner_id": None
+                "user_id": user_id
             })
             return True
 
@@ -452,6 +460,19 @@ class GameManager:
                 db_lobby.joiner_id = None
                 db_lobby.status = "waiting"
                 await db.commit()
+
+        # ✅ Уведомляем kicked игрока
+        await self._send_to_user(target_id, {
+            "type": "kicked_from_lobby",
+            "lobby_id": lobby_id
+        })
+        
+        # ✅ Уведомляем создателя об обновлении
+        await self._send_to_user(lobby["creator_id"], {
+            "type": "lobby_player_left",
+            "lobby_id": lobby_id,
+            "user_id": target_id
+        })
 
         return True
 
