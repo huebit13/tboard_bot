@@ -319,7 +319,7 @@ class GameManager:
                 "joiner_id": None,
                 "creator_ready": False,
                 "joiner_ready": False,
-                "status": "waiting"
+                "status": "waiting",
                 "expires_at": expires_at
             }
 
