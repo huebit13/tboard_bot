@@ -28,22 +28,25 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
 
 
 def verify_token(token: str):
-    """
-    Проверяет JWT-токен и возвращает встроенные данные (например, user_id).
-    :param token: Токен для проверки.
-    :return: Данные из токена (dict) или None, если токен недействителен.
-    """
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id: int = payload.get("sub") 
+        user_id: int = payload.get("sub")
+        
         if user_id is None:
+            logger.warning("Token verification failed: 'sub' claim missing")
             return None
+        
+        logger.info(f"Token verified successfully for user_id: {user_id}")
         return {"user_id": user_id}
+        
     except jwt.ExpiredSignatureError:
-        
+        logger.warning("Token verification failed: token expired")
         return None
-    except jwt.JWTError:
         
+    except jwt.InvalidTokenError as e:
+        logger.warning(f"Token verification failed: invalid token - {str(e)}")
         return None
-    except Exception:
+        
+    except Exception as e:
+        logger.error(f"Unexpected error during token verification: {e}", exc_info=True)
         return None
