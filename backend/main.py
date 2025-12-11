@@ -211,7 +211,10 @@ async def websocket_endpoint(websocket: WebSocket):
                         await game_manager._send_to_user(lobby["creator_id"], {
                             "type": "lobby_joined",
                             "lobby_id": lobby_id,
-                            "joiner_id": user_id
+                            "joiner_id": user_id,  # ← добавь это
+                            "game_type": lobby["game_type"],
+                            "stake": lobby["stake"],
+                            "has_password": lobby["has_password"]
                         })
                         await websocket.send_json({
                             "type": "lobby_joined",
