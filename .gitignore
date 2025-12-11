@@ -45,4 +45,4 @@ frontend/tboard/dist
 frontend\tboard\.env
 .vite
 dist/
-__pycache__
+__pycache__/
