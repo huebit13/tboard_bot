@@ -34,6 +34,8 @@ app.include_router(users.router, prefix="/api", tags=["users"])
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
+_background_tasks = set()
+
 
 @app.post("/api/auth/login")
 async def login(request: Request, db: AsyncSession = Depends(get_db)): 
@@ -269,6 +271,15 @@ async def websocket_endpoint(websocket: WebSocket):
                         })
                         continue
                     await game_manager.handle_player_move(game_id, user_id, move)
+                
+                elif action == "leave_lobby":
+                    lobby_id = data.get("lobby_id")
+                    if lobby_id:
+                        await game_manager.leave_lobby(user_id, lobby_id)
+                        await websocket.send_json({
+                            "type": "lobby_left",
+                            "lobby_id": lobby_id
+                        })
 
                 elif action == "ping":
                     await websocket.send_json({"type": "pong"})
@@ -295,7 +306,13 @@ async def websocket_endpoint(websocket: WebSocket):
     except WebSocketDisconnect:
         if 'user_id' in locals():
             game_manager.disconnect_user(user_id)
-            logger.info(f"WebSocket disconnected normally for user {user_id}")
+            lobbies_to_remove = []
+            for lid, lobby in game_manager.active_lobbies.items():
+                if lobby["creator_id"] == user_id:
+                    lobbies_to_remove.append(lid)
+            for lid in lobbies_to_remove:
+                del game_manager.active_lobbies[lid]
+            logger.info(f"WebSocket disconnected for user {user_id}. Cleaned up {len(lobbies_to_remove)} lobbies.")
         else:
             logger.info("WebSocket disconnected before authentication")
     
@@ -321,12 +338,39 @@ async def websocket_test(websocket: WebSocket):
     except WebSocketDisconnect:
         logger.info("Test WebSocket disconnected")
 
+async def cleanup_expired_lobbies():
+    while True:
+        await asyncio.sleep(300)  # 5 минут
+        from datetime import datetime
+        now = datetime.utcnow()
+        expired = []
+        for lid, lobby in list(game_manager.active_lobbies.items()):
+            # Убедись, что в lobby есть expires_at (возможно, его нет)
+            expires_at = lobby.get("expires_at")
+            if expires_at and expires_at < now:
+                expired.append(lid)
+
+        for lid in expired:
+            logger.info(f"Cleaning up expired lobby {lid}")
+            del game_manager.active_lobbies[lid]
+            # Опционально: удалить из БД
+            from backend.database import AsyncSessionLocal
+            async with AsyncSessionLocal() as db:
+                db_lobby = await db.get(Lobby, lid)
+                if db_lobby:
+                    await db.delete(db_lobby)
+                    await db.commit()
+
 
 @app.on_event("startup")
 async def startup():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     logger.info("Application started successfully")
+
+    task = asyncio.create_task(cleanup_expired_lobbies())
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
 
 @app.get("/")

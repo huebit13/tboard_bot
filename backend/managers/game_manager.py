@@ -320,6 +320,7 @@ class GameManager:
                 "creator_ready": False,
                 "joiner_ready": False,
                 "status": "waiting"
+                 "expires_at": expires_at
             }
 
             return lobby.id
@@ -355,6 +356,48 @@ class GameManager:
             lobby["status"] = "full"
 
         return True, "Joined"
+
+    async def leave_lobby(self, user_id: int, lobby_id: int):
+        if lobby_id not in self.active_lobbies:
+            return False
+
+        lobby = self.active_lobbies[lobby_id]
+
+        if lobby["creator_id"] == user_id:
+            # Создатель выходит — удаляем лобби полностью
+            del self.active_lobbies[lobby_id]
+            from backend.database import AsyncSessionLocal
+            async with AsyncSessionLocal() as db:
+                db_lobby = await db.get(Lobby, lobby_id)
+                if db_lobby:
+                    await db.delete(db_lobby)
+                    await db.commit()
+            logger.info(f"Lobby {lobby_id} deleted by creator {user_id}")
+            return True
+
+        elif lobby["joiner_id"] == user_id:
+            # Участник выходит — освобождаем слот
+            lobby["joiner_id"] = None
+            lobby["joiner_ready"] = False
+            lobby["status"] = "waiting"
+
+            from backend.database import AsyncSessionLocal
+            async with AsyncSessionLocal() as db:
+                db_lobby = await db.get(Lobby, lobby_id)
+                if db_lobby:
+                    db_lobby.joiner_id = None
+                    db_lobby.status = "waiting"
+                    await db.commit()
+
+            # Уведомляем создателя
+            await self._send_to_user(lobby["creator_id"], {
+                "type": "lobby_joined_left",
+                "lobby_id": lobby_id,
+                "joiner_id": None
+            })
+            return True
+
+        return False
 
     async def set_lobby_ready(self, user_id: int, lobby_id: int, is_ready: bool):
         if lobby_id not in self.active_lobbies:
