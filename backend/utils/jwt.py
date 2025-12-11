@@ -1,5 +1,5 @@
 import os
-import logger
+import logging
 import jwt
 from datetime import datetime, timedelta, timezone
 from typing import Optional
