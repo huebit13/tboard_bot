@@ -320,7 +320,7 @@ class GameManager:
                 "creator_ready": False,
                 "joiner_ready": False,
                 "status": "waiting"
-                 "expires_at": expires_at
+                "expires_at": expires_at
             }
 
             return lobby.id
