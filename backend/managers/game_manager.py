@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from typing import Dict, Optional
-from backend.database.models import Game, User
+from backend.database.models import Game, User, Lobby
 from backend.games import GAME_ENGINES
 from sqlalchemy import select, update
 from datetime import datetime
