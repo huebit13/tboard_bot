@@ -4,10 +4,11 @@ from backend.database import engine, get_db, Base, AsyncSession
 from backend.schemas.user import UserCreate, WalletConnect
 from backend.crud.user import create_or_update_user, connect_wallet
 from backend.routers import users
-from datetime import timedelta
+from datetime import timedelta, datetime
 from backend.utils.jwt import create_access_token, verify_token
 from backend.managers.game_manager import game_manager
 from backend.database.models import Game, User, Lobby
+from sqlalchemy import select
 import os
 import json
 import logging
@@ -21,7 +22,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://tboard.space",
-        "http://localhost:5173",  # Для локальной разработки
+        "http://localhost:5173",
         "http://localhost:3000"
     ],
     allow_credentials=True,
@@ -32,6 +33,7 @@ app.add_middleware(
 app.include_router(users.router, prefix="/api", tags=["users"])
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+
 
 @app.post("/api/auth/login")
 async def login(request: Request, db: AsyncSession = Depends(get_db)): 
@@ -44,7 +46,6 @@ async def login(request: Request, db: AsyncSession = Depends(get_db)):
             logger.warning("Init data is missing in request")
             raise HTTPException(status_code=400, detail="Init data is required")
         
-        # Парсим initData
         params = {}
         for pair in init_data.split("&"):
             if "=" in pair:
@@ -53,7 +54,6 @@ async def login(request: Request, db: AsyncSession = Depends(get_db)):
                     import urllib.parse
                     params[key] = urllib.parse.unquote(value)
         
-        # Получаем данные пользователя
         if 'user' not in params:
             logger.warning("User data not found in init data")
             raise HTTPException(status_code=400, detail="User data not found")
@@ -68,7 +68,6 @@ async def login(request: Request, db: AsyncSession = Depends(get_db)):
         
         logger.info(f"Processing user: telegram_id={telegram_id}, username={username}")
 
-        # Создаем/обновляем пользователя
         user = await create_or_update_user(
             db=db,
             telegram_id=telegram_id,
@@ -109,17 +108,14 @@ async def websocket_endpoint(websocket: WebSocket):
     Требует токен в query параметрах: /ws/game?token=<JWT_TOKEN>
     """
     try:
-        # Логируем попытку подключения
         logger.info(f"WebSocket connection attempt from {websocket.client}")
         
-        # Проверяем токен из URL-параметра
         token = websocket.query_params.get("token")
         if not token:
             logger.warning("WebSocket connection attempt without token.")
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Token required")
             return
 
-        # Верифицируем токен
         user_data = verify_token(token)
         if not user_data:
             logger.warning(f"WebSocket connection attempt with invalid token: {token[:20]}...")
@@ -129,20 +125,16 @@ async def websocket_endpoint(websocket: WebSocket):
         user_id = user_data["user_id"]
         logger.info(f"WebSocket authenticated for user {user_id}")
 
-        # Подключаем пользователя через менеджер
         await game_manager.connect_user(websocket, user_id)
         
-        # Отправляем приветственное сообщение
         await websocket.send_json({
             "type": "connected",
             "message": "Successfully connected to game server",
             "user_id": user_id
         })
 
-        # Основной цикл обработки сообщений
         while True:
             try:
-                # Ждём сообщение от клиента
                 data = await websocket.receive_json()
                 logger.info(f"Received message from user {user_id}: {data}")
                 
@@ -151,25 +143,47 @@ async def websocket_endpoint(websocket: WebSocket):
                 if action == "join_queue":
                     game_type = data.get("game_type", "rps")
                     stake = data.get("stake")
-                    
                     if stake is None:
                         await websocket.send_json({
                             "type": "error",
                             "message": "Stake is required to join queue."
                         })
                         continue
-                    
-                    # Добавляем в очередь через менеджер
                     await game_manager.add_to_queue(user_id, game_type, stake)
                     await websocket.send_json({
                         "type": "queue_joined",
                         "message": f"Joined queue for {game_type} with stake {stake}"
                     })
-                
+
+                elif action == "get_lobby_list":
+                    from backend.database import AsyncSessionLocal
+                    async with AsyncSessionLocal() as db:
+                        now = datetime.utcnow()
+                        result = await db.execute(
+                            select(Lobby, User.username)
+                            .join(User, Lobby.creator_id == User.id)
+                            .where(Lobby.status == "waiting", Lobby.expires_at > now)
+                        )
+                        lobbies = []
+                        for lobby, username in result:
+                            lobbies.append({
+                                "id": lobby.id,
+                                "game_type": lobby.game_type,
+                                "stake": float(lobby.stake),
+                                "has_password": lobby.password_hash is not None,
+                                "creator_id": lobby.creator_id,
+                                "creator_name": username or "Player",
+                                "players_count": 1
+                            })
+                        await websocket.send_json({
+                            "type": "lobby_list",
+                            "lobbies": lobbies
+                        })
+
                 elif action == "create_lobby":
                     game_type = data.get("game_type")
                     stake = data.get("stake")
-                    password = data.get("password")  # может быть None
+                    password = data.get("password")
                     if not game_type or stake is None:
                         await websocket.send_json({"type": "error", "message": "game_type and stake required"})
                         continue
@@ -209,7 +223,6 @@ async def websocket_endpoint(websocket: WebSocket):
                     is_ready = data.get("is_ready", False)
                     if lobby_id:
                         await game_manager.set_lobby_ready(user_id, lobby_id, is_ready)
-                        # Рассылаем обновление
                         if lobby_id in game_manager.active_lobbies:
                             lobby = game_manager.active_lobbies[lobby_id]
                             for uid in [lobby["creator_id"], lobby["joiner_id"]]:
@@ -230,7 +243,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         success = await game_manager.kick_from_lobby(user_id, lobby_id, target_id)
                         if success:
                             await game_manager._send_to_user(target_id, {
-                                "type": "kicked_from_lobby",
+                                "type": "kicked_from_lobby",  # ✅ исправлена опечатка
                                 "lobby_id": lobby_id
                             })
                             lobby = game_manager.active_lobbies[lobby_id]
@@ -241,7 +254,6 @@ async def websocket_endpoint(websocket: WebSocket):
                             })
 
                 elif action == "leave_queue":
-                    # TODO: Реализовать выход из очереди
                     await websocket.send_json({
                         "type": "queue_left",
                         "message": "Left the queue"
@@ -250,19 +262,15 @@ async def websocket_endpoint(websocket: WebSocket):
                 elif action == "make_move":
                     game_id = data.get("game_id")
                     move = data.get("move")
-                    
                     if not game_id or not move:
                         await websocket.send_json({
                             "type": "error",
                             "message": "Game ID and move are required."
                         })
                         continue
-                    
-                    # Обрабатываем ход через менеджер
                     await game_manager.handle_player_move(game_id, user_id, move)
 
                 elif action == "ping":
-                    # Поддержка ping для проверки соединения
                     await websocket.send_json({"type": "pong"})
 
                 else:
@@ -285,7 +293,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 })
 
     except WebSocketDisconnect:
-        # Обрабатываем нормальное отключение клиента
         if 'user_id' in locals():
             game_manager.disconnect_user(user_id)
             logger.info(f"WebSocket disconnected normally for user {user_id}")
@@ -293,7 +300,6 @@ async def websocket_endpoint(websocket: WebSocket):
             logger.info("WebSocket disconnected before authentication")
     
     except Exception as e:
-        # Обрабатываем непредвиденные ошибки
         logger.error(f"Unexpected error in WebSocket connection: {e}", exc_info=True)
         if 'user_id' in locals():
             game_manager.disconnect_user(user_id)
@@ -315,6 +321,7 @@ async def websocket_test(websocket: WebSocket):
     except WebSocketDisconnect:
         logger.info("Test WebSocket disconnected")
 
+
 @app.on_event("startup")
 async def startup():
     async with engine.begin() as conn:
@@ -329,7 +336,6 @@ def read_root():
 
 @app.get("/health")
 def health_check():
-    """Health check endpoint для мониторинга"""
     return {"status": "healthy", "service": "tboard-backend"}
 
 
