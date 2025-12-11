@@ -228,6 +228,18 @@ async def websocket_endpoint(websocket: WebSocket):
             pass
 
 
+@app.websocket("/ws/test")
+async def websocket_test(websocket: WebSocket):
+    await websocket.accept()
+    await websocket.send_json({"message": "Test WebSocket works!"})
+    logger.info("Test WebSocket connected")
+    try:
+        while True:
+            data = await websocket.receive_text()
+            await websocket.send_json({"echo": data})
+    except WebSocketDisconnect:
+        logger.info("Test WebSocket disconnected")
+
 @app.on_event("startup")
 async def startup():
     async with engine.begin() as conn:
