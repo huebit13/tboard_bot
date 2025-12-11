@@ -9,6 +9,7 @@ from backend.utils.jwt import create_access_token, verify_token
 from backend.managers.game_manager import game_manager
 from backend.database.models import Game, User, Lobby
 from sqlalchemy import select
+import asyncio
 import os
 import json
 import logging
