@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Depends, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 from backend.database import engine, get_db, Base, AsyncSession 
 from backend.schemas.user import UserCreate, WalletConnect
@@ -18,10 +18,14 @@ app = FastAPI(title="TBoard Backend", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://tboard.space",
+        "http://localhost:5173",  # Для локальной разработки
+        "http://localhost:3000"
+    ],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
 )
 
 app.include_router(users.router, prefix="/api", tags=["users"])
@@ -31,12 +35,12 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 @app.post("/api/auth/login")
 async def login(request: Request, db: AsyncSession = Depends(get_db)): 
     try:
-        logger.info("Login endpoint called") # Добавьте лог
+        logger.info("Login endpoint called")
         body = await request.json()
         init_data = body.get("initData")
         
         if not init_data:
-            logger.warning("Init data is missing in request") # Добавьте лог
+            logger.warning("Init data is missing in request")
             raise HTTPException(status_code=400, detail="Init data is required")
         
         # Парсим initData
@@ -50,7 +54,7 @@ async def login(request: Request, db: AsyncSession = Depends(get_db)):
         
         # Получаем данные пользователя
         if 'user' not in params:
-            logger.warning("User data not found in init data") # Добавьте лог
+            logger.warning("User data not found in init data")
             raise HTTPException(status_code=400, detail="User data not found")
         
         user_data = json.loads(params['user'])
@@ -58,10 +62,10 @@ async def login(request: Request, db: AsyncSession = Depends(get_db)):
         username = user_data.get("username")
         
         if not telegram_id:
-            logger.warning("Telegram ID not found in user data") # Добавьте лог
+            logger.warning("Telegram ID not found in user data")
             raise HTTPException(status_code=400, detail="Telegram ID not found")
         
-        logger.info(f"Processing user: telegram_id={telegram_id}, username={username}") # Добавьте лог
+        logger.info(f"Processing user: telegram_id={telegram_id}, username={username}")
 
         # Создаем/обновляем пользователя
         user = await create_or_update_user(
@@ -70,7 +74,7 @@ async def login(request: Request, db: AsyncSession = Depends(get_db)):
             username=username
         )
         
-        logger.info(f"User processed successfully: telegram_id={telegram_id}, id={user.id if user else 'None'}") # Добавьте лог
+        logger.info(f"User processed successfully: telegram_id={telegram_id}, id={user.id if user else 'None'}")
 
         access_token_data = {"sub": user.id} 
         access_token = create_access_token(data=access_token_data, expires_delta=timedelta(hours=1))
@@ -90,80 +94,156 @@ async def login(request: Request, db: AsyncSession = Depends(get_db)):
         }
         
     except HTTPException:
-        logger.error("HTTPException in login", exc_info=True) # Добавьте лог
+        logger.error("HTTPException in login", exc_info=True)
         raise
     except Exception as e:
-        logger.error(f"Unexpected error in login: {e}", exc_info=True) # Добавьте лог
+        logger.error(f"Unexpected error in login: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
-app.include_router(users.router, prefix="/api", tags=["users"])
-
 @app.websocket("/ws/game")
 async def websocket_endpoint(websocket: WebSocket):
-    # Проверяем токен из URL-параметра (например, /ws/game?token=...)
-    token = websocket.query_params.get("token")
-    if not token:
-        logger.warning("WebSocket connection attempt without token.")
-        await websocket.close(code=1008) # Policy Violation
-        return
-
-    user_data = verify_token(token)
-    if not user_data:
-        logger.warning("WebSocket connection attempt with invalid token.")
-        await websocket.close(code=1008) # Policy Violation
-        return
-
-    user_id = user_data["user_id"]
-    logger.info(f"WebSocket connection attempt for user {user_id}.")
-
-    # Подключаем пользователя через менеджер
-    await game_manager.connect_user(websocket, user_id)
-
+    """
+    WebSocket endpoint для игровых взаимодействий.
+    Требует токен в query параметрах: /ws/game?token=<JWT_TOKEN>
+    """
     try:
+        # Логируем попытку подключения
+        logger.info(f"WebSocket connection attempt from {websocket.client}")
+        
+        # Проверяем токен из URL-параметра
+        token = websocket.query_params.get("token")
+        if not token:
+            logger.warning("WebSocket connection attempt without token.")
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Token required")
+            return
+
+        # Верифицируем токен
+        user_data = verify_token(token)
+        if not user_data:
+            logger.warning(f"WebSocket connection attempt with invalid token: {token[:20]}...")
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Invalid token")
+            return
+
+        user_id = user_data["user_id"]
+        logger.info(f"WebSocket authenticated for user {user_id}")
+
+        # Подключаем пользователя через менеджер
+        await game_manager.connect_user(websocket, user_id)
+        
+        # Отправляем приветственное сообщение
+        await websocket.send_json({
+            "type": "connected",
+            "message": "Successfully connected to game server",
+            "user_id": user_id
+        })
+
+        # Основной цикл обработки сообщений
         while True:
-            # Ждём сообщение от клиента
-            data = await websocket.receive_json()
-            action = data.get("action")
+            try:
+                # Ждём сообщение от клиента
+                data = await websocket.receive_json()
+                logger.info(f"Received message from user {user_id}: {data}")
+                
+                action = data.get("action")
 
-            if action == "join_queue":
-                game_type = data.get("game_type", "rps") # По умолчанию RPS
-                stake = data.get("stake")
-                if stake is None:
-                    await websocket.send_json({"type": "error", "message": "Stake is required to join queue."})
-                    continue
-                # Добавляем в очередь через менеджер
-                await game_manager.add_to_queue(user_id, game_type, stake)
+                if action == "join_queue":
+                    game_type = data.get("game_type", "rps")
+                    stake = data.get("stake")
+                    
+                    if stake is None:
+                        await websocket.send_json({
+                            "type": "error",
+                            "message": "Stake is required to join queue."
+                        })
+                        continue
+                    
+                    # Добавляем в очередь через менеджер
+                    await game_manager.add_to_queue(user_id, game_type, stake)
+                    await websocket.send_json({
+                        "type": "queue_joined",
+                        "message": f"Joined queue for {game_type} with stake {stake}"
+                    })
 
-            elif action == "make_move":
-                game_id = data.get("game_id")
-                move = data.get("move")
-                if not game_id or not move:
-                    await websocket.send_json({"type": "error", "message": "Game ID and move are required."})
-                    continue
-                # Обрабатываем ход через менеджер
-                await game_manager.handle_player_move(game_id, user_id, move)
+                elif action == "leave_queue":
+                    # TODO: Реализовать выход из очереди
+                    await websocket.send_json({
+                        "type": "queue_left",
+                        "message": "Left the queue"
+                    })
 
-            # Добавьте другие действия по мере необходимости (например, leave_queue)
+                elif action == "make_move":
+                    game_id = data.get("game_id")
+                    move = data.get("move")
+                    
+                    if not game_id or not move:
+                        await websocket.send_json({
+                            "type": "error",
+                            "message": "Game ID and move are required."
+                        })
+                        continue
+                    
+                    # Обрабатываем ход через менеджер
+                    await game_manager.handle_player_move(game_id, user_id, move)
+
+                elif action == "ping":
+                    # Поддержка ping для проверки соединения
+                    await websocket.send_json({"type": "pong"})
+
+                else:
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": f"Unknown action: {action}"
+                    })
+
+            except json.JSONDecodeError:
+                logger.error(f"Invalid JSON received from user {user_id}")
+                await websocket.send_json({
+                    "type": "error",
+                    "message": "Invalid JSON format"
+                })
+            except Exception as e:
+                logger.error(f"Error processing message from user {user_id}: {e}", exc_info=True)
+                await websocket.send_json({
+                    "type": "error",
+                    "message": "Internal server error"
+                })
 
     except WebSocketDisconnect:
-        # Обрабатываем отключение клиента
-        game_manager.disconnect_user(user_id)
-        logger.info(f"WebSocket disconnected for user {user_id}.")
+        # Обрабатываем нормальное отключение клиента
+        if 'user_id' in locals():
+            game_manager.disconnect_user(user_id)
+            logger.info(f"WebSocket disconnected normally for user {user_id}")
+        else:
+            logger.info("WebSocket disconnected before authentication")
+    
     except Exception as e:
-        logger.error(f"Error in WebSocket connection for user {user_id}: {e}")
-        game_manager.disconnect_user(user_id)
+        # Обрабатываем непредвиденные ошибки
+        logger.error(f"Unexpected error in WebSocket connection: {e}", exc_info=True)
+        if 'user_id' in locals():
+            game_manager.disconnect_user(user_id)
+        try:
+            await websocket.close(code=status.WS_1011_INTERNAL_ERROR, reason="Internal server error")
+        except:
+            pass
 
 
 @app.on_event("startup")
 async def startup():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    logger.info("Application started successfully")
 
 
 @app.get("/")
 def read_root():
     return {"message": "TBoard Backend is running!"}
+
+
+@app.get("/health")
+def health_check():
+    """Health check endpoint для мониторинга"""
+    return {"status": "healthy", "service": "tboard-backend"}
 
 
 if __name__ == "__main__":
