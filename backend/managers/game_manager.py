@@ -65,6 +65,24 @@ class GameManager:
         await self.wait_queue.put(request)
         logger.info(f"User {user_id} added to queue for {game_type} with stake {stake}.")
         await self._attempt_matchmaking()
+    
+    async def remove_from_queue(self, user_id: int):
+        """Удаляет пользователя из очереди по user_id"""
+        # Создаём временную очередь без этого пользователя
+        new_queue = asyncio.Queue()
+        removed = False
+
+        while not self.wait_queue.empty():
+            req = await self.wait_queue.get()
+            if req.user_id == user_id:
+                removed = True
+                logger.info(f"User {user_id} removed from queue")
+            else:
+                await new_queue.put(req)
+
+        # Заменяем очередь
+        self.wait_queue = new_queue
+        return removed
 
     async def _attempt_matchmaking(self):
         while self.wait_queue.qsize() >= 2:

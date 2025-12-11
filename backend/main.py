@@ -257,9 +257,11 @@ async def websocket_endpoint(websocket: WebSocket):
                             })
 
                 elif action == "leave_queue":
+                    removed = await game_manager.remove_from_queue(user_id)
                     await websocket.send_json({
                         "type": "queue_left",
-                        "message": "Left the queue"
+                        "message": "Left the queue",
+                        "success": removed
                     })
 
                 elif action == "make_move":
