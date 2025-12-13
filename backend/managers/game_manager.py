@@ -1,10 +1,13 @@
+# backend/managers/game_manager.py
+
 import asyncio
 import logging
 from typing import Dict, Optional
 from backend.database.models import Game, User, Lobby
 from backend.games import GAME_ENGINES
+from backend.services.coin_service import coin_service
 from sqlalchemy import select, update
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 logger = logging.getLogger(__name__)
@@ -17,20 +20,23 @@ class PlayerConnection:
 
 
 class PendingMatchRequest:
-    def __init__(self, user_id: int, game_type: str, stake: float):
+    def __init__(self, user_id: int, game_type: str, stake: float, currency: str):
         self.user_id = user_id
         self.game_type = game_type
         self.stake = stake
+        self.currency = currency
         self.created_at = datetime.utcnow()
 
 
 class ActiveGame:
-    def __init__(self, game_id: int, player1_id: int, player2_id: int, game_type: str, stake: float):
+    def __init__(self, game_id: int, player1_id: int, player2_id: int, 
+                 game_type: str, stake: float, currency: str):
         self.id = game_id
         self.player1_id = player1_id
         self.player2_id = player2_id
         self.game_type = game_type
         self.stake = stake
+        self.currency = currency
         self.created_at = datetime.utcnow()
         
         # Создаём движок для конкретной игры
@@ -53,22 +59,21 @@ class GameManager:
     async def connect_user(self, websocket, user_id: int):
         await websocket.accept()
         self.active_connections[user_id] = PlayerConnection(websocket, user_id)
-        logger.info(f"User {user_id} connected to WebSocket.")
+        logger.info(f"User {user_id} connected to WebSocket")
 
     def disconnect_user(self, user_id: int):
         if user_id in self.active_connections:
             del self.active_connections[user_id]
-            logger.info(f"User {user_id} disconnected from WebSocket.")
+            logger.info(f"User {user_id} disconnected from WebSocket")
 
-    async def add_to_queue(self, user_id: int, game_type: str, stake: float):
-        request = PendingMatchRequest(user_id, game_type, stake)
+    async def add_to_queue(self, user_id: int, game_type: str, stake: float, currency: str = "TON"):
+        request = PendingMatchRequest(user_id, game_type, stake, currency)
         await self.wait_queue.put(request)
-        logger.info(f"User {user_id} added to queue for {game_type} with stake {stake}.")
+        logger.info(f"User {user_id} added to queue for {game_type} with stake {stake} {currency}")
         await self._attempt_matchmaking()
     
     async def remove_from_queue(self, user_id: int):
         """Удаляет пользователя из очереди по user_id"""
-        # Создаём временную очередь без этого пользователя
         new_queue = asyncio.Queue()
         removed = False
 
@@ -80,7 +85,6 @@ class GameManager:
             else:
                 await new_queue.put(req)
 
-        # Заменяем очередь
         self.wait_queue = new_queue
         return removed
 
@@ -94,10 +98,19 @@ class GameManager:
                 while not self.wait_queue.empty():
                     player2_req = await self.wait_queue.get()
                     
+                    # Проверяем совпадение типа игры, ставки И валюты
                     if (player1_req.game_type == player2_req.game_type and 
-                        player1_req.stake == player2_req.stake):
-                        logger.info(f"Match found between {player1_req.user_id} and {player2_req.user_id} for {player1_req.game_type}")
-                        await self._create_game(player1_req.user_id, player2_req.user_id, player1_req.game_type, player1_req.stake)
+                        player1_req.stake == player2_req.stake and
+                        player1_req.currency == player2_req.currency):
+                        logger.info(f"Match found between {player1_req.user_id} and {player2_req.user_id} "
+                                  f"for {player1_req.game_type} ({player1_req.stake} {player1_req.currency})")
+                        await self._create_game(
+                            player1_req.user_id, 
+                            player2_req.user_id, 
+                            player1_req.game_type, 
+                            player1_req.stake,
+                            player1_req.currency
+                        )
                         matched = True
                         break
                     else:
@@ -113,12 +126,72 @@ class GameManager:
                 logger.error(f"Error in matchmaking: {e}", exc_info=True)
                 break
 
-    async def _create_game(self, player1_id: int, player2_id: int, game_type: str, stake: float):
+    async def _create_game(self, player1_id: int, player2_id: int, game_type: str, 
+                          stake: float, currency: str = "TON"):
         from backend.database import AsyncSessionLocal
         
         async with AsyncSessionLocal() as db:
             try:
-                # Создаём временный движок для получения начального состояния
+                # Списываем ставки в зависимости от валюты
+                if currency == "COINS":
+                    # Проверяем балансы
+                    balance1 = await coin_service.get_balance(db, player1_id)
+                    balance2 = await coin_service.get_balance(db, player2_id)
+                    
+                    stake_decimal = Decimal(str(stake))
+                    
+                    if balance1 < stake_decimal:
+                        logger.warning(f"Player {player1_id} has insufficient coins: {balance1} < {stake_decimal}")
+                        await self._send_to_user(player1_id, {
+                            "type": "error",
+                            "message": "Insufficient coins balance"
+                        })
+                        return
+                    
+                    if balance2 < stake_decimal:
+                        logger.warning(f"Player {player2_id} has insufficient coins: {balance2} < {stake_decimal}")
+                        await self._send_to_user(player2_id, {
+                            "type": "error",
+                            "message": "Insufficient coins balance"
+                        })
+                        return
+                    
+                    # Списываем коины у обоих игроков
+                    success1 = await coin_service.deduct_coins(
+                        db, player1_id, stake_decimal, 
+                        "game_stake", f"Stake for {game_type} game"
+                    )
+                    success2 = await coin_service.deduct_coins(
+                        db, player2_id, stake_decimal, 
+                        "game_stake", f"Stake for {game_type} game"
+                    )
+                    
+                    if not (success1 and success2):
+                        # Откатываем если что-то пошло не так
+                        if success1:
+                            await coin_service.add_coins(
+                                db, player1_id, stake_decimal,
+                                "refund", "Game creation failed"
+                            )
+                        raise ValueError("Failed to deduct coins from players")
+                    
+                    # Обновляем статистику
+                    await db.execute(
+                        update(User)
+                        .where(User.id == player1_id)
+                        .values(total_staked_coins=User.total_staked_coins + stake_decimal)
+                    )
+                    await db.execute(
+                        update(User)
+                        .where(User.id == player2_id)
+                        .values(total_staked_coins=User.total_staked_coins + stake_decimal)
+                    )
+                
+                elif currency == "TON":
+                    # TODO: Логика для TON (проверка баланса, эскроу и т.д.)
+                    pass
+                
+                # Создаём игру
                 engine_class = GAME_ENGINES.get(game_type)
                 if not engine_class:
                     raise ValueError(f"Unknown game type: {game_type}")
@@ -129,8 +202,9 @@ class GameManager:
                     mode="1v1",
                     player1_id=player1_id,
                     player2_id=player2_id,
-                    stake_amount_ton=Decimal(stake),
-                    currency="TON",
+                    stake_amount_ton=Decimal(stake) if currency == "TON" else 0,
+                    stake_amount_coins=Decimal(stake) if currency == "COINS" else 0,
+                    currency=currency,
                     game_state_json=temp_engine.get_initial_state(),
                     created_at=datetime.utcnow()
                 )
@@ -138,16 +212,18 @@ class GameManager:
                 await db.commit()
                 await db.refresh(new_game)
 
-                active_game = ActiveGame(new_game.id, player1_id, player2_id, game_type, stake)
+                active_game = ActiveGame(new_game.id, player1_id, player2_id, game_type, stake, currency)
                 self.active_games[new_game.id] = active_game
 
-                logger.info(f"Game {new_game.id} created with {game_type} engine")
+                logger.info(f"Game {new_game.id} created with {game_type} engine ({currency})")
 
+                # Уведомляем игроков
                 await self._send_to_user(player1_id, {
                     "type": "game_found",
                     "game_id": new_game.id,
                     "opponent_id": player2_id,
                     "stake": stake,
+                    "currency": currency,
                     "game_type": game_type
                 })
                 await self._send_to_user(player2_id, {
@@ -155,13 +231,15 @@ class GameManager:
                     "game_id": new_game.id,
                     "opponent_id": player1_id,
                     "stake": stake,
+                    "currency": currency,
                     "game_type": game_type
                 })
 
             except Exception as e:
                 logger.error(f"Error creating game: {e}", exc_info=True)
-                await self.wait_queue.put(PendingMatchRequest(player1_id, game_type, stake))
-                await self.wait_queue.put(PendingMatchRequest(player2_id, game_type, stake))
+                # Возвращаем игроков в очередь
+                await self.wait_queue.put(PendingMatchRequest(player1_id, game_type, stake, currency))
+                await self.wait_queue.put(PendingMatchRequest(player2_id, game_type, stake, currency))
 
     async def handle_player_move(self, game_id: int, user_id: int, move: str):
         if game_id not in self.active_games:
@@ -196,9 +274,7 @@ class GameManager:
         round_winner = game.engine.check_round_end(game.state)
         
         if round_winner is not None:
-            # Раунд закончен
             if round_winner != "draw":
-                # Обновляем счёт
                 if "score" in game.state:
                     game.state["score"][round_winner] = game.state["score"].get(round_winner, 0) + 1
             
@@ -231,7 +307,6 @@ class GameManager:
                 
                 await self._end_game(game_id, winner_id)
             else:
-                # Игра продолжается, сбрасываем для нового раунда
                 game.state = game.engine.reset_round(game.state)
 
     async def _end_game(self, game_id: int, winner_id: Optional[int]):
@@ -243,6 +318,7 @@ class GameManager:
         
         async with AsyncSessionLocal() as db:
             try:
+                # Обновляем игру в БД
                 stmt = update(Game).where(Game.id == game_id).values(
                     winner_id=winner_id,
                     result="draw" if winner_id is None else ("player1_win" if winner_id == game.player1_id else "player2_win"),
@@ -251,37 +327,67 @@ class GameManager:
                 )
                 await db.execute(stmt)
 
-                rake_percentage = 0.05
-                total_pot = game.stake * 2
-                rake_amount = total_pot * rake_percentage
-                winner_payout = total_pot - rake_amount if winner_id else total_pot / 2
+                # Рассчитываем выплату
+                if game.currency == "COINS":
+                    rake_percentage = 0.05
+                    total_pot = Decimal(str(game.stake * 2))
+                    rake_amount = total_pot * Decimal(str(rake_percentage))
+                    winner_payout = total_pot - rake_amount if winner_id else total_pot / 2
 
-                if winner_id:
-                    loser_id = game.player2_id if winner_id == game.player1_id else game.player1_id
-                    await db.execute(update(User).where(User.id == winner_id).values(
-                        total_wins=User.total_wins + 1,
-                        total_games_played=User.total_games_played + 1,
-                        total_won_ton=User.total_won_ton + Decimal(winner_payout)
-                    ))
-                    await db.execute(update(User).where(User.id == loser_id).values(
-                        total_losses=User.total_losses + 1,
-                        total_games_played=User.total_games_played + 1
-                    ))
-                else:
-                    await db.execute(update(User).where(User.id == game.player1_id).values(
-                        total_games_played=User.total_games_played + 1
-                    ))
-                    await db.execute(update(User).where(User.id == game.player2_id).values(
-                        total_games_played=User.total_games_played + 1
-                    ))
+                    if winner_id:
+                        loser_id = game.player2_id if winner_id == game.player1_id else game.player1_id
+                        
+                        # Начисляем выигрыш
+                        await coin_service.add_coins(
+                            db, winner_id, winner_payout,
+                            "game_win", f"Won game {game_id}",
+                            related_game_id=game_id
+                        )
+                        
+                        # Обновляем статистику
+                        await db.execute(update(User).where(User.id == winner_id).values(
+                            total_wins=User.total_wins + 1,
+                            total_games_played=User.total_games_played + 1,
+                            total_won_coins=User.total_won_coins + winner_payout
+                        ))
+                        await db.execute(update(User).where(User.id == loser_id).values(
+                            total_losses=User.total_losses + 1,
+                            total_games_played=User.total_games_played + 1
+                        ))
+                    else:
+                        # Ничья - возврат ставок
+                        refund = Decimal(str(game.stake))
+                        await coin_service.add_coins(
+                            db, game.player1_id, refund,
+                            "refund", f"Draw in game {game_id}",
+                            related_game_id=game_id
+                        )
+                        await coin_service.add_coins(
+                            db, game.player2_id, refund,
+                            "refund", f"Draw in game {game_id}",
+                            related_game_id=game_id
+                        )
+                        
+                        await db.execute(update(User).where(User.id == game.player1_id).values(
+                            total_games_played=User.total_games_played + 1
+                        ))
+                        await db.execute(update(User).where(User.id == game.player2_id).values(
+                            total_games_played=User.total_games_played + 1
+                        ))
+                
+                elif game.currency == "TON":
+                    # TODO: Логика для TON
+                    pass
 
                 await db.commit()
 
+                # Уведомляем игроков
                 result_message = {
                     "type": "game_result",
                     "game_id": game_id,
                     "winner_id": winner_id,
-                    "final_state": game.state
+                    "final_state": game.state,
+                    "currency": game.currency
                 }
                 await self._send_to_user(game.player1_id, result_message)
                 await self._send_to_user(game.player2_id, result_message)
@@ -302,13 +408,27 @@ class GameManager:
         else:
             logger.warning(f"User {user_id} not connected")
     
-    async def create_lobby(self, user_id: int, game_type: str, stake: float, password: Optional[str] = None):
+    async def create_lobby(
+        self, 
+        user_id: int, 
+        game_type: str, 
+        stake: float, 
+        password: Optional[str] = None,
+        currency: str = "TON"
+    ):
         from backend.database import AsyncSessionLocal
-        from datetime import datetime, timedelta
         import bcrypt
 
         async with AsyncSessionLocal() as db:
-            # Создаём запись в БД
+            # Проверяем баланс
+            if currency == "COINS":
+                user_balance = await coin_service.get_balance(db, user_id)
+                if user_balance < Decimal(str(stake)):
+                    return None, "Insufficient coins balance"
+            elif currency == "TON":
+                # TODO: Проверка TON баланса
+                pass
+            
             password_hash = None
             if password:
                 password_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
@@ -318,6 +438,7 @@ class GameManager:
             lobby = Lobby(
                 game_type=game_type,
                 stake=Decimal(stake),
+                currency=currency,
                 password_hash=password_hash,
                 creator_id=user_id,
                 status="waiting",
@@ -327,11 +448,11 @@ class GameManager:
             await db.commit()
             await db.refresh(lobby)
 
-            # Храним в памяти для быстрого доступа
             self.active_lobbies[lobby.id] = {
                 "id": lobby.id,
                 "game_type": game_type,
                 "stake": stake,
+                "currency": currency,
                 "has_password": password is not None,
                 "creator_id": user_id,
                 "joiner_id": None,
@@ -341,7 +462,7 @@ class GameManager:
                 "expires_at": expires_at
             }
 
-            return lobby.id
+            return lobby.id, "Success"
 
     async def join_lobby(self, user_id: int, lobby_id: int, password: Optional[str] = None):
         import bcrypt
@@ -354,6 +475,12 @@ class GameManager:
 
         from backend.database import AsyncSessionLocal
         async with AsyncSessionLocal() as db:
+            # Проверяем баланс
+            if lobby["currency"] == "COINS":
+                user_balance = await coin_service.get_balance(db, user_id)
+                if user_balance < Decimal(str(lobby["stake"])):
+                    return False, "Insufficient coins balance"
+            
             db_lobby = await db.get(Lobby, lobby_id)
             if not db_lobby:
                 return False, "Lobby not found in DB"
@@ -365,7 +492,6 @@ class GameManager:
                 if not bcrypt.checkpw(password.encode('utf-8'), db_lobby.password_hash.encode('utf-8')):
                     return False, "Invalid password"
 
-            # Обновляем в БД и в памяти
             db_lobby.joiner_id = user_id
             db_lobby.status = "full"
             await db.commit()
@@ -382,7 +508,6 @@ class GameManager:
         lobby = self.active_lobbies[lobby_id]
 
         if lobby["creator_id"] == user_id:
-            # ✅ НОВОЕ: уведомляем участника о закрытии лобби
             if lobby["joiner_id"]:
                 await self._send_to_user(lobby["joiner_id"], {
                     "type": "lobby_closed",
@@ -390,7 +515,6 @@ class GameManager:
                     "reason": "Creator left"
                 })
             
-            # Создатель выходит — удаляем лобби полностью
             del self.active_lobbies[lobby_id]
             from backend.database import AsyncSessionLocal
             async with AsyncSessionLocal() as db:
@@ -402,7 +526,6 @@ class GameManager:
             return True
 
         elif lobby["joiner_id"] == user_id:
-            # Участник выходит — освобождаем слот
             lobby["joiner_id"] = None
             lobby["joiner_ready"] = False
             lobby["status"] = "waiting"
@@ -415,7 +538,6 @@ class GameManager:
                     db_lobby.status = "waiting"
                     await db.commit()
 
-            # ✅ ИСПРАВЛЕНО: правильное сообщение для создателя
             await self._send_to_user(lobby["creator_id"], {
                 "type": "lobby_player_left",
                 "lobby_id": lobby_id,
@@ -436,7 +558,6 @@ class GameManager:
         else:
             return
 
-        # Проверяем, оба ли ready
         if lobby["joiner_id"] and lobby["creator_ready"] and lobby["joiner_ready"]:
             await self._start_game_from_lobby(lobby_id)
 
@@ -445,7 +566,7 @@ class GameManager:
             return False
         lobby = self.active_lobbies[lobby_id]
         if lobby["creator_id"] != kicker_id:
-            return False  # Только создатель может кикать
+            return False
         if target_id != lobby["joiner_id"]:
             return False
 
@@ -461,13 +582,11 @@ class GameManager:
                 db_lobby.status = "waiting"
                 await db.commit()
 
-        # ✅ Уведомляем kicked игрока
         await self._send_to_user(target_id, {
             "type": "kicked_from_lobby",
             "lobby_id": lobby_id
         })
         
-        # ✅ Уведомляем создателя об обновлении
         await self._send_to_user(lobby["creator_id"], {
             "type": "lobby_player_left",
             "lobby_id": lobby_id,
@@ -482,9 +601,10 @@ class GameManager:
             player1_id=lobby["creator_id"],
             player2_id=lobby["joiner_id"],
             game_type=lobby["game_type"],
-            stake=lobby["stake"]
+            stake=lobby["stake"],
+            currency=lobby["currency"]
         )
-        # Удаляем лобби
+        
         del self.active_lobbies[lobby_id]
         from backend.database import AsyncSessionLocal
         async with AsyncSessionLocal() as db:

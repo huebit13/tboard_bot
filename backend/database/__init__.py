@@ -1,7 +1,7 @@
 # backend/database/__init__.py
 
 from .connection import engine, AsyncSessionLocal, get_db, Base
-from .models import User, Game, Referral
+from .models import User, Game, Referral, Lobby, CoinTransaction, DailyReward
 from sqlalchemy.ext.asyncio import AsyncSession
 
 __all__ = [
@@ -10,7 +10,10 @@ __all__ = [
     "get_db", 
     "User", 
     "Game", 
-    "Referral", 
+    "Referral",
+    "Lobby",
+    "CoinTransaction",
+    "DailyReward",
     "AsyncSession", 
     "Base"
 ]
